@@ -75,6 +75,7 @@ class QuantumCircuitEnv(gym.Env):
         1. Solution quality (Max-Cut objective)
         2. Circuit depth (penalty for longer circuits)
         3. Gate count (penalty for more gates)
+        4. Improvement over previous state
         """
         # Get current statevector
         simulator = cirq.Simulator()
@@ -83,12 +84,28 @@ class QuantumCircuitEnv(gym.Env):
         # Calculate Max-Cut objective
         maxcut_value = calculate_maxcut_objective(result, self.graph_edges)
         
-        # Calculate penalties
-        depth_penalty = -0.1 * len(self.circuit)
-        gate_penalty = -0.05 * len(list(self.circuit.all_operations()))
+        # Calculate penalties with reduced weights
+        depth_penalty = -0.01 * len(self.circuit)  # Reduced from -0.1
+        gate_penalty = -0.005 * len(list(self.circuit.all_operations()))  # Reduced from -0.05
         
-        # Combine rewards
-        reward = maxcut_value + depth_penalty + gate_penalty
+        # Calculate improvement over previous state
+        improvement = 0
+        if hasattr(self, 'previous_maxcut_value'):
+            improvement = max(0, maxcut_value - self.previous_maxcut_value) * 2.0  # Bonus for improvement
+        
+        # Store current maxcut value for next step
+        self.previous_maxcut_value = maxcut_value
+        
+        # Combine rewards with better scaling
+        reward = (
+            maxcut_value * 2.0 +  # Increase weight of MaxCut objective
+            depth_penalty +
+            gate_penalty +
+            improvement  # Add improvement bonus
+        )
+        
+        # Add small constant reward for each step to encourage exploration
+        reward += 0.1
         
         return reward
     
@@ -139,6 +156,11 @@ class QuantumCircuitEnv(gym.Env):
             self.graph_edges,
             self.params
         )
+        
+        # Initialize previous maxcut value
+        simulator = cirq.Simulator()
+        result = simulator.simulate(self.circuit)
+        self.previous_maxcut_value = calculate_maxcut_objective(result, self.graph_edges)
         
         self.current_reward = self._calculate_reward()
         
