@@ -2,10 +2,15 @@ import torch
 import numpy as np
 import cirq
 import os
-from src.DQL import DQL
-from src.utils.circuit_utils import create_maxcut_circuit, calculate_maxcut_objective, generate_random_graph
-import matplotlib.pyplot as plt
+import subprocess
+from datetime import datetime
+import argparse
 from tqdm import tqdm
+import wandb
+import matplotlib.pyplot as plt
+
+from DQL import DQL
+from utils.circuit_utils import create_maxcut_circuit, calculate_maxcut_objective, generate_random_graph
 
 def run_qaoa(num_qubits, graph_edges, num_trials=100):
     """Run QAOA algorithm and return average objective value."""
@@ -40,7 +45,32 @@ def test_model_on_graph(model, graph_edges, num_qubits):
     
     return total_reward
 
+def create_tmux_session():
+    """Create a new tmux session for running the test."""
+    session_name = f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    # Create new tmux session
+    subprocess.run(['tmux', 'new-session', '-d', '-s', session_name])
+    
+    # Send the command to run test
+    cmd = f"cd {os.getcwd()} && CUDA_LAUNCH_BLOCKING=1 python3 src/test.py --tmux"
+    subprocess.run(['tmux', 'send-keys', '-t', session_name, cmd, 'C-m'])
+    
+    print(f"Created tmux session '{session_name}'")
+    print("To attach to the session, run: tmux attach -t", session_name)
+    print("To detach from the session, press Ctrl+B then D")
+
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--tmux', action='store_true', help='Indicates if running in tmux session')
+    args = parser.parse_args()
+
+    if not args.tmux:
+        # Only create tmux session if not already in one
+        create_tmux_session()
+        return
+
     # Hyperparameters from the JSON file
     hyperparams = {
         "num_qubits": 4,
@@ -63,6 +93,14 @@ def main():
         "epsilon_decay": 0.9992954038889231,
         "tau": 0.006076563585289057
     }
+    
+    # Initialize wandb
+    wandb.init(
+        project="quantum-rl-dql-test",
+        config=hyperparams,
+        name=f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        reinit=True
+    )
     
     # Create models directory if it doesn't exist
     os.makedirs('models', exist_ok=True)
@@ -120,12 +158,29 @@ def main():
         # Run DQL
         dql_score = test_model_on_graph(dql, test_graph, hyperparams["num_qubits"])
         dql_scores.append(dql_score)
+        
+        # Log individual test results to wandb
+        wandb.log({
+            "test_graph": i,
+            "qaoa_score": qaoa_score,
+            "dql_score": dql_score,
+            "improvement": ((dql_score - qaoa_score) / qaoa_score * 100)
+        })
     
     # Calculate statistics
     dql_mean = np.mean(dql_scores)
     dql_std = np.std(dql_scores)
     qaoa_mean = np.mean(qaoa_scores)
     qaoa_std = np.std(qaoa_scores)
+    
+    # Log final statistics to wandb
+    wandb.log({
+        "final_qaoa_mean": qaoa_mean,
+        "final_qaoa_std": qaoa_std,
+        "final_dql_mean": dql_mean,
+        "final_dql_std": dql_std,
+        "final_improvement": ((dql_mean - qaoa_mean) / qaoa_mean * 100)
+    })
     
     print("\nResults:")
     print(f"QAOA - Mean: {qaoa_mean:.4f} ± {qaoa_std:.4f}")
@@ -155,7 +210,12 @@ def main():
     
     plt.tight_layout()
     plt.savefig('algorithm_comparison.png')
+    
+    # Log the plot to wandb
+    wandb.log({"algorithm_comparison": wandb.Image('algorithm_comparison.png')})
+    
     plt.close()
+    wandb.finish()
 
 if __name__ == "__main__":
     main() 
