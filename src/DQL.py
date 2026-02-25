@@ -82,18 +82,23 @@ class DQL:
         epsilon_end=0.01,
         buffer_size=100000,
         tau=0.005,
+        optimize_params=False,
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.optimize_params = optimize_params
         print(f"Using device: {self.device}")
+        if optimize_params:
+            print("Env mode: optimizing QAOA (gamma, beta); no SWAPs.")
         
         # Initialize environment
         self.env = QuantumCircuitEnv(
             num_qubits=num_qubits,
             edge_probability=edge_probability,
-            max_steps=max_steps
+            max_steps=max_steps,
+            optimize_params=optimize_params,
         )
         self.num_actions = self.env.action_space.n
-        print(f"Number of actions: {self.num_actions}")  # Debug action space size
+        print(f"Number of actions: {self.num_actions}")
         
         # Initialize Q-networks
         self.q_network = Critic(num_qubits, self.num_actions).to(self.device)

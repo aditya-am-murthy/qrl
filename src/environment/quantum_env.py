@@ -11,30 +11,43 @@ from utils.circuit_utils import (
     generate_random_graph
 )
 
+# Step size for (gamma, beta) when using param actions (radians)
+PARAM_STEP = 0.25
+# Bounds for gamma, beta (radians)
+PARAM_LOW, PARAM_HIGH = 0.0, 2.0 * np.pi
+
+
 class QuantumCircuitEnv(gym.Env):
     """
     Custom Environment for quantum circuit optimization using RL.
-    The environment allows an agent to rearrange quantum gates to optimize
-    the circuit for solving the Max-Cut problem using Cirq.
+    Two modes:
+    - optimize_params=False (default): agent appends SWAP gates (permutes qubits).
+    - optimize_params=True: agent updates QAOA (gamma, beta) each step; no SWAPs.
+      Theoretically stronger: better gamma/beta directly improve the QAOA state.
     """
     
-    def __init__(self, num_qubits=4, max_steps=100, edge_probability=0.5):
+    def __init__(self, num_qubits=4, max_steps=100, edge_probability=0.5, optimize_params=False):
         super(QuantumCircuitEnv, self).__init__()
         
         self.num_qubits = num_qubits
         self.max_steps = max_steps
         self.current_step = 0
         self.edge_probability = edge_probability
+        self.optimize_params = optimize_params
         
         # Generate random graph for Max-Cut
         self.graph_edges = generate_random_graph(num_qubits, edge_probability)
         
-        # Initialize QAOA parameters
-        self.params = [np.pi/4, np.pi/4]  # Initial gamma and beta
+        # Initialize QAOA parameters [gamma, beta]
+        self.params = [np.pi / 4, np.pi / 4]
         
-        # Define action space (swap gates between positions)
-        num_possible_swaps = (num_qubits * (num_qubits - 1)) // 2
-        self.action_space = spaces.Discrete(num_possible_swaps)
+        if optimize_params:
+            # Actions: (Δγ, Δβ) in {-step, 0, +step}^2 -> 9 actions
+            self._param_deltas = [(dg, db) for dg in (-PARAM_STEP, 0, PARAM_STEP) for db in (-PARAM_STEP, 0, PARAM_STEP)]
+            self.action_space = spaces.Discrete(9)
+        else:
+            num_possible_swaps = (num_qubits * (num_qubits - 1)) // 2
+            self.action_space = spaces.Discrete(num_possible_swaps)
         
         # Define observation space
         self.observation_space = spaces.Dict({
@@ -111,45 +124,42 @@ class QuantumCircuitEnv(gym.Env):
     
     def step(self, action):
         """
-        Execute one time step within the environment.
-        
-        Args:
-            action: Integer representing which qubit pair to swap
-            
-        Returns:
-            observation: Current state of the circuit
-            reward: Reward for the current state
-            terminated: Whether the episode is done
-            truncated: Whether the episode was truncated
-            info: Additional information
+        Execute one time step.
+        If optimize_params: action = index into (Δγ, Δβ) grid; update params and rebuild QAOA circuit.
+        Else: action = which qubit pair to SWAP; append SWAP to circuit.
         """
         self.current_step += 1
         
-        # Convert action to qubit pair
-        qubit_pairs = [(i, j) for i in range(self.num_qubits) 
-                      for j in range(i+1, self.num_qubits)]
-        qubit1, qubit2 = qubit_pairs[action]
+        if self.optimize_params:
+            dg, db = self._param_deltas[action]
+            self.params[0] = np.clip(self.params[0] + dg, PARAM_LOW, PARAM_HIGH)
+            self.params[1] = np.clip(self.params[1] + db, PARAM_LOW, PARAM_HIGH)
+            self.circuit = create_maxcut_circuit(
+                self.num_qubits, self.graph_edges, self.params
+            )
+        else:
+            qubit_pairs = [(i, j) for i in range(self.num_qubits)
+                           for j in range(i + 1, self.num_qubits)]
+            qubit1, qubit2 = qubit_pairs[action]
+            self.circuit.append(cirq.SWAP(self.qubits[qubit1], self.qubits[qubit2]))
         
-        # Apply swap gate
-        self.circuit.append(cirq.SWAP(self.qubits[qubit1], self.qubits[qubit2]))
-        
-        # Calculate reward
         self.current_reward = self._calculate_reward()
-        
-        # Check if episode is done
         terminated = self.current_step >= self.max_steps
         truncated = False
-        
         return self._get_observation(), self.current_reward, terminated, truncated, {}
     
-    def reset(self, seed=None):
-        """Reset the environment to initial state."""
+    def reset(self, seed=None, options=None):
+        """Reset the environment to initial state.
+        options: optional dict with 'graph_edges' to evaluate on a specific graph.
+        """
         super().reset(seed=seed)
         self.current_step = 0
-        
+        if options is not None and "graph_edges" in options:
+            self.graph_edges = list(options["graph_edges"])
+
         # Create qubits
         self.qubits = [cirq.LineQubit(i) for i in range(self.num_qubits)]
-        
+
         # Create initial QAOA circuit
         self.circuit = create_maxcut_circuit(
             self.num_qubits,
